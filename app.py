@@ -21,10 +21,15 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GSC_REFRESH_TOKEN    = os.environ.get("GSC_REFRESH_TOKEN", "")
 GSC_SITE_URL         = os.environ.get("GSC_SITE_URL", "https://www.kapruka.com")
 
-# Branded + known non-organic query terms
-NOISE_PATTERN = re.compile(r"\b(?:kapruka|liq[ou]r|liquor|pizza|dlb|dbl)\b", re.IGNORECASE)
+# ─────────────────────────────────────────────────────────────────────────────
+# Filters — branded queries excluded at the API level, liquor pages post-filter
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Liquor product PAGES (filtered by URL, not just query)
+# These are pushed into the GSC API dimensionFilterGroups so rows never
+# arrive in memory. Each becomes a "query notContaining X" filter.
+BRANDED_QUERY_TERMS = ["kapruka", "liquor", "liqor", "pizza", "dlb", "dbl"]
+
+# Liquor product PAGES (filtered post-fetch by URL pattern)
 LIQUOR_PAGE = re.compile(
     r"(?:liq|whisky|whiskey|brandy|vodka|arrack|beer|wine|rum|gin|champagne|cognac|"
     r"scotch|bourbon|abv|somersby|carlsberg|heineken|jack.daniel|johnnie.walker|"
@@ -48,24 +53,42 @@ def _gsc_service():
     return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX #1: Paginated GSC fetch — pulls ALL rows instead of capping at 25K
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_gsc(service, start, end, row_limit=25000, max_pages=4):
+def _build_query_filters():
     """
-    Paginate through GSC API results using startRow.
-    The API returns max 25,000 rows per request. Cap at max_pages iterations
-    (default 4 = 100K rows) to stay within gunicorn worker timeout.
+    Build GSC API dimension filters that exclude branded/noise queries
+    server-side. This drastically reduces the row count returned, avoiding
+    memory issues and timeouts on small Render instances.
+
+    GSC API filters within a single filterGroup are ANDed together,
+    so "notContaining kapruka" AND "notContaining liquor" AND ... works.
+    """
+    filters = []
+    for term in BRANDED_QUERY_TERMS:
+        filters.append({
+            "dimension": "query",
+            "operator": "notContaining",
+            "expression": term,
+        })
+    return [{"filters": filters}]
+
+
+def fetch_gsc(service, start, end, row_limit=25000):
+    """
+    Single-pass GSC fetch with server-side query filtering.
+    Branded/noise queries are excluded by the API itself, so the result
+    set is small enough to fit in one 25K-row page for a 7-day window.
     """
     all_records = []
     start_row = 0
-    page = 0
 
-    while page < max_pages:
+    query_filters = _build_query_filters()
+
+    while True:
         body = {
             "startDate": start,
             "endDate": end,
             "dimensions": ["date", "query", "page"],
+            "dimensionFilterGroups": query_filters,
             "rowLimit": row_limit,
             "startRow": start_row,
             "dataState": "final",
@@ -83,20 +106,24 @@ def fetch_gsc(service, start, end, row_limit=25000, max_pages=4):
                 "position": r.get("position", 0),
             })
 
-        # If we got fewer rows than the limit, we've reached the end
         if len(rows) < row_limit:
             break
 
         start_row += row_limit
-        page += 1
+
+        # Safety cap: 3 pages = 75K rows max to prevent runaway memory
+        if start_row >= row_limit * 3:
+            break
 
     return pd.DataFrame(all_records)
 
 
 def clean_and_tag(df):
+    """Post-fetch filtering: remove liquor pages, tag product/category."""
     if df.empty:
         return df
-    df = df[~df["query"].str.contains(NOISE_PATTERN, regex=True, na=False)].copy()
+    # Query noise is already filtered at the API level.
+    # Only liquor PAGE filtering remains here (can't do URL regex in GSC API).
     df = df[~df["page"].str.contains(LIQUOR_PAGE, na=False)].copy()
 
     def tag(url):
@@ -166,7 +193,6 @@ def page_movers(df_before, df_after, page_type, n=10):
     if a.empty and b.empty:
         return [], [], [], []
     m = a.merge(b, on="page", suffixes=("_after", "_before"), how="outer").fillna(0)
-    # Ensure all expected columns exist even if one side was empty
     num_cols = ["clicks_after", "clicks_before", "impressions_after",
                 "impressions_before", "avg_position_after", "avg_position_before"]
     for col in num_cols:
@@ -174,7 +200,6 @@ def page_movers(df_before, df_after, page_type, n=10):
             m[col] = 0
         m[col] = pd.to_numeric(m[col], errors="coerce").fillna(0)
     m["click_change"] = m["clicks_after"] - m["clicks_before"]
-    # Higher position number = worse rank, so a positive change = dropped
     m["pos_change"] = m["avg_position_after"] - m["avg_position_before"]
 
     def fmt(row):
@@ -193,8 +218,6 @@ def page_movers(df_before, df_after, page_type, n=10):
     gainers = [fmt(r) for _, r in m.nlargest(n, "click_change").iterrows()]
     losers = [fmt(r) for _, r in m.nsmallest(n, "click_change").iterrows()]
 
-    # Position drops: only pages that ranked in BOTH periods (real comparison)
-    # and had meaningful visibility, sorted by biggest rank drop.
     ranked_both = m[
         (m["avg_position_before"] > 0)
         & (m["avg_position_after"] > 0)
@@ -206,28 +229,25 @@ def page_movers(df_before, df_after, page_type, n=10):
         if r["pos_change"] > 0
     ]
 
-    # Emerging pages: had ZERO clicks in the before period, now getting clicks.
-    # Brand-new winners that didn't exist in the comparison window.
     emerging_df = m[(m["clicks_before"] == 0) & (m["clicks_after"] > 0)]
     emerging = [fmt(r) for _, r in emerging_df.nlargest(n, "clicks_after").iterrows()]
 
     return gainers, losers, pos_droppers, emerging
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX #2: Surface row counts + pagination info so you can verify completeness
-# ─────────────────────────────────────────────────────────────────────────────
 def compute_comparison(before_start, before_end, after_start, after_end):
     service = _gsc_service()
     raw_before_full = fetch_gsc(service, before_start, before_end)
     raw_after_full = fetch_gsc(service, after_start, after_end)
 
-    # Track raw row counts before filtering
     rows_before_raw = len(raw_before_full)
     rows_after_raw = len(raw_after_full)
 
     raw_before = clean_and_tag(raw_before_full)
     raw_after = clean_and_tag(raw_after_full)
+
+    # Free the unfiltered frames immediately
+    del raw_before_full, raw_after_full
 
     rows_before_clean = len(raw_before)
     rows_after_clean = len(raw_after)
@@ -259,14 +279,13 @@ def compute_comparison(before_start, before_end, after_start, after_end):
             "after": {"start": after_start, "end": after_end},
         },
         "filters": {
-            "queries": ["kapruka", "liquor / liqor", "pizza", "dlb", "dbl"],
+            "queries": BRANDED_QUERY_TERMS,
             "liquor_pages": [
                 "whisky", "brandy", "vodka", "arrack", "beer", "wine", "rum",
                 "gin", "champagne", "cognac", "scotch", "bourbon", "and named "
                 "liquor brands (Old Keg, VAT 9, Carlsberg, Heineken, etc.)",
             ],
         },
-        # Row counts for transparency — verify data completeness
         "row_counts": {
             "before_raw": rows_before_raw,
             "before_after_filters": rows_before_clean,
@@ -290,13 +309,8 @@ def compute_comparison(before_start, before_end, after_start, after_end):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIX #3: Push "after" window back to 4 days instead of 3 for safer final data
-# ─────────────────────────────────────────────────────────────────────────────
 def default_periods():
     today = datetime.date.today()
-    # GSC data takes 2-4 days to finalize. Using 4-day lag to avoid
-    # partial data in the "after" window understating real numbers.
     lag = 4
     after_end = today - datetime.timedelta(days=lag)
     after_start = today - datetime.timedelta(days=lag + 6)
