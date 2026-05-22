@@ -97,6 +97,12 @@
     font-size: 12px; color: var(--text-2); margin-bottom: 18px; line-height: 1.5;
   }
   .filter-note b { color: var(--text); font-weight: 500; }
+  .row-counts {
+    display: inline-flex; gap: 16px; font-size: 11px; color: var(--text-3);
+    margin-top: 6px;
+  }
+  .row-counts span { display: flex; align-items: center; gap: 4px; }
+  .row-counts .count { color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
   .pos-worse { color: var(--red); }
   .pos-better { color: var(--green); }
   .error { background: var(--red-bg); color: var(--red); padding: 16px; border-radius: 10px; }
@@ -156,15 +162,15 @@ function pctClass(v, invert=false) {
 }
 function sign(v, suffix="%") { return (v > 0 ? "+" : "") + v + suffix; }
 
-// Compute a before/after window: current week vs N weeks earlier.
-// After = last 7 days ending 3 days back (GSC data lag). Before = same span N weeks before.
+// FIX: Match backend's 4-day lag instead of 3
 function presetParams(weeksAgo) {
   const iso = d => d.toISOString().slice(0, 10);
   const today = new Date();
-  const afterEnd = new Date(today); afterEnd.setDate(today.getDate() - 3);
-  const afterStart = new Date(today); afterStart.setDate(today.getDate() - 9);
-  const beforeEnd = new Date(today); beforeEnd.setDate(today.getDate() - 3 - weeksAgo * 7);
-  const beforeStart = new Date(today); beforeStart.setDate(today.getDate() - 9 - weeksAgo * 7);
+  const lag = 4; // GSC needs ~4 days to finalize
+  const afterEnd = new Date(today); afterEnd.setDate(today.getDate() - lag);
+  const afterStart = new Date(today); afterStart.setDate(today.getDate() - lag - 6);
+  const beforeEnd = new Date(today); beforeEnd.setDate(today.getDate() - lag - weeksAgo * 7);
+  const beforeStart = new Date(today); beforeStart.setDate(today.getDate() - lag - 6 - weeksAgo * 7);
   return {
     before_start: iso(beforeStart), before_end: iso(beforeEnd),
     after_start: iso(afterStart), after_end: iso(afterEnd),
@@ -179,7 +185,6 @@ async function load(params) {
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     render(data);
-    // sync pickers to whatever period was actually used
     document.getElementById("beforeStart").value = data.periods.before.start;
     document.getElementById("beforeEnd").value = data.periods.before.end;
     document.getElementById("afterStart").value = data.periods.after.start;
@@ -210,9 +215,20 @@ function render(d) {
   if (d.filters) {
     document.getElementById("filterNote").innerHTML =
       `<b>What's filtered out:</b> Branded &amp; non-organic search queries containing ` +
-      d.filters.queries.map(q => "“" + q + "”").join(", ") +
+      d.filters.queries.map(q => "\u201c" + q + "\u201d").join(", ") +
       `. Liquor product pages are also excluded (whisky, brandy, vodka, beer, wine, etc. ` +
-      `and named liquor brands). Positions are impression-weighted; CTR is true clicks ÷ impressions.`;
+      `and named liquor brands). Positions are impression-weighted; CTR is true clicks \u00f7 impressions.`;
+  }
+
+  // Row count transparency bar
+  let rowCountsHtml = "";
+  if (d.row_counts) {
+    const rc = d.row_counts;
+    rowCountsHtml = `
+      <div class="row-counts">
+        <span>Before: <span class="count">${fmt(rc.before_raw)}</span> rows fetched → <span class="count">${fmt(rc.before_after_filters)}</span> after filters</span>
+        <span>After: <span class="count">${fmt(rc.after_raw)}</span> rows fetched → <span class="count">${fmt(rc.after_after_filters)}</span> after filters</span>
+      </div>`;
   }
 
   const all = c.ALL;
@@ -264,7 +280,7 @@ function render(d) {
     <div class="section-title">Product pages losing position</div>
     ${posTable(d.movers.product.pos_drops)}`;
 
-  document.getElementById("content").innerHTML = kpis + cards + charts + tables;
+  document.getElementById("content").innerHTML = kpis + rowCountsHtml + cards + charts + tables;
   drawClicks(d.daily);
   drawCtr(d.daily);
 }
