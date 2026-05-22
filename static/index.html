@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kapruka GSC Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  :root {
+    --bg: #faf9f5;
+    --card: #ffffff;
+    --secondary: #f0eee6;
+    --border: #e8e6dd;
+    --text: #1a1a18;
+    --text-2: #73726c;
+    --text-3: #a3a299;
+    --green: #1d9e75;
+    --green-bg: #e7f5ef;
+    --red: #e24b4a;
+    --red-bg: #fbeae9;
+    --blue: #378add;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f1e1c; --card: #2a2926; --secondary: #2f2e2a; --border: #3a3833;
+      --text: #f0eee6; --text-2: #a3a299; --text-3: #73726c;
+      --green-bg: #14352a; --red-bg: #3a1f1e;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 4px; }
+  h1 { font-size: 22px; font-weight: 600; }
+  .subtitle { font-size: 13px; color: var(--text-2); margin-bottom: 20px; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .datebar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .dategroup { display: flex; align-items: center; gap: 6px; background: var(--secondary); padding: 6px 10px; border-radius: 8px; }
+  .dategroup-label { font-size: 12px; color: var(--text-2); font-weight: 500; margin-right: 2px; }
+  .arrow { color: var(--text-3); font-size: 13px; }
+  input[type="date"] {
+    font-family: inherit; font-size: 13px; padding: 4px 6px; border-radius: 6px;
+    border: 0.5px solid var(--border); background: var(--card); color: var(--text);
+    color-scheme: light dark;
+  }
+  button {
+    font-family: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px;
+    border: 0.5px solid var(--border); background: var(--card); color: var(--text);
+    cursor: pointer; transition: background 0.15s;
+  }
+  button:hover { background: var(--secondary); }
+  button.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi { background: var(--secondary); border-radius: 10px; padding: 14px 16px; }
+  .kpi .label { font-size: 12px; color: var(--text-2); margin-bottom: 4px; }
+  .kpi .value { font-size: 21px; font-weight: 500; }
+  .kpi .delta { font-size: 12px; margin-top: 4px; }
+  .up { color: var(--green); } .down { color: var(--red); } .flat { color: var(--text-2); }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
+  .card.highlight { border: 2px solid var(--blue); }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; }
+  .card-title { font-size: 14px; font-weight: 500; }
+  .badge { margin-left: auto; font-size: 11px; padding: 2px 10px; border-radius: 8px; }
+  .badge.up { background: var(--green-bg); }
+  .badge.down { background: var(--red-bg); }
+  .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .metric .label { font-size: 12px; color: var(--text-2); }
+  .metric .value { font-size: 19px; font-weight: 500; }
+  .metric .sub { font-size: 12px; }
+  .chart-wrap { position: relative; height: 280px; margin-bottom: 24px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; font-size: 12px; color: var(--text-2); }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend .dot { width: 10px; height: 10px; }
+  .section-title { font-size: 14px; font-weight: 500; margin: 4px 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px; }
+  th { text-align: right; font-size: 12px; color: var(--text-2); font-weight: 400; padding: 8px 6px; border-bottom: 0.5px solid var(--border); }
+  th:first-child { text-align: left; }
+  td { padding: 8px 6px; border-bottom: 0.5px solid var(--border); text-align: right; }
+  td:first-child { text-align: left; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .loading { text-align: center; padding: 60px; color: var(--text-2); }
+  .error { background: var(--red-bg); color: var(--red); padding: 16px; border-radius: 10px; }
+  @media (max-width: 720px) {
+    .kpi-row { grid-template-columns: 1fr 1fr; }
+    .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kapruka GSC Monitor</h1>
+  <span id="genTime" class="subtitle" style="margin:0;"></span>
+</header>
+
+<div class="datebar">
+  <div class="dategroup">
+    <span class="dategroup-label">Before</span>
+    <input type="date" id="beforeStart" />
+    <span class="arrow">→</span>
+    <input type="date" id="beforeEnd" />
+  </div>
+  <div class="dategroup">
+    <span class="dategroup-label">After</span>
+    <input type="date" id="afterStart" />
+    <span class="arrow">→</span>
+    <input type="date" id="afterEnd" />
+  </div>
+  <button class="primary" id="runBtn">Compare</button>
+  <button id="resetBtn">Reset to default</button>
+</div>
+<div class="subtitle" id="periodLabel">Loading…</div>
+
+<div id="content">
+  <div class="loading">Pulling Search Console data…</div>
+</div>
+
+<script>
+const KAP = "https://www.kapruka.com";
+
+function fmt(n) { return n.toLocaleString(); }
+function pctClass(v, invert=false) {
+  if (v === 0) return "flat";
+  const positive = invert ? v < 0 : v > 0;
+  return positive ? "up" : "down";
+}
+function sign(v, suffix="%") { return (v > 0 ? "+" : "") + v + suffix; }
+
+async function load(params) {
+  document.getElementById("content").innerHTML = '<div class="loading">Pulling Search Console data…</div>';
+  try {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    const res = await fetch("/api/comparison" + qs);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    render(data);
+    // sync pickers to whatever period was actually used
+    document.getElementById("beforeStart").value = data.periods.before.start;
+    document.getElementById("beforeEnd").value = data.periods.before.end;
+    document.getElementById("afterStart").value = data.periods.after.start;
+    document.getElementById("afterEnd").value = data.periods.after.end;
+  } catch (e) {
+    document.getElementById("content").innerHTML =
+      '<div class="error">Failed to load: ' + e.message + '</div>';
+  }
+}
+
+function currentPickerParams() {
+  return {
+    before_start: document.getElementById("beforeStart").value,
+    before_end: document.getElementById("beforeEnd").value,
+    after_start: document.getElementById("afterStart").value,
+    after_end: document.getElementById("afterEnd").value,
+  };
+}
+
+function render(d) {
+  const c = d.comparison;
+  const p = d.periods;
+  document.getElementById("periodLabel").textContent =
+    `Non-branded organic, liquor excluded · Before ${p.before.start} → ${p.before.end} vs After ${p.after.start} → ${p.after.end}`;
+  document.getElementById("genTime").textContent =
+    "Pulled " + new Date(d.generated_at).toLocaleString();
+
+  const all = c.ALL;
+  const kpis = `
+    <div class="kpi-row">
+      <div class="kpi"><div class="label">Total clicks</div>
+        <div class="value">${fmt(all.before.clicks)} → ${fmt(all.after.clicks)}</div>
+        <div class="delta ${pctClass(all.click_change_pct)}">${sign(all.click_change_pct)}</div></div>
+      <div class="kpi"><div class="label">Total impressions</div>
+        <div class="value">${fmt(all.before.impressions)} → ${fmt(all.after.impressions)}</div>
+        <div class="delta ${pctClass(all.imp_change_pct)}">${sign(all.imp_change_pct)}</div></div>
+      <div class="kpi"><div class="label">Avg position</div>
+        <div class="value">${all.before.avg_position} → ${all.after.avg_position}</div>
+        <div class="delta ${pctClass(all.pos_change, true)}">${sign(all.pos_change, "")}</div></div>
+      <div class="kpi"><div class="label">Unique queries</div>
+        <div class="value">${fmt(all.before.unique_queries)} → ${fmt(all.after.unique_queries)}</div>
+        <div class="delta flat">${fmt(all.after.unique_queries - all.before.unique_queries)}</div></div>
+    </div>`;
+
+  const cards = `
+    <div class="cards">
+      ${segmentCard("Category pages", "#1d9e75", c.category, true)}
+      ${segmentCard("Product pages", "#378add", c.product, false)}
+    </div>`;
+
+  const charts = `
+    <div class="legend">
+      <span><span class="dot" style="background:#1d9e75"></span>Category after</span>
+      <span><span class="dot" style="background:rgba(29,158,117,.35)"></span>Category before</span>
+      <span><span class="dot" style="background:#378add"></span>Product after</span>
+      <span><span class="dot" style="background:rgba(55,138,221,.35)"></span>Product before</span>
+    </div>
+    <div class="chart-wrap"><canvas id="clicksChart"></canvas></div>
+    <div class="chart-wrap"><canvas id="ctrChart"></canvas></div>`;
+
+  const tables = `
+    <div class="section-title">Top category gainers</div>
+    ${moverTable(d.movers.category.gainers)}
+    <div class="section-title">Top product gainers</div>
+    ${moverTable(d.movers.product.gainers)}`;
+
+  document.getElementById("content").innerHTML = kpis + cards + charts + tables;
+  drawClicks(d.daily);
+  drawCtr(d.daily);
+}
+
+function segmentCard(title, color, seg, highlight) {
+  const b = seg.before, a = seg.after;
+  const badgeClass = seg.click_change_pct >= 0 ? "up" : "down";
+  return `
+    <div class="card ${highlight ? "highlight" : ""}">
+      <div class="card-head">
+        <span class="dot" style="background:${color}"></span>
+        <span class="card-title">${title}</span>
+        <span class="badge ${badgeClass}">${sign(seg.click_change_pct)}</span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Clicks</div>
+          <div class="value">${fmt(b.clicks)} → ${fmt(a.clicks)}</div>
+          <div class="sub ${pctClass(seg.click_change_pct)}">${sign(a.clicks - b.clicks, "")} clicks</div></div>
+        <div class="metric"><div class="label">Impressions</div>
+          <div class="value">${fmt(b.impressions)} → ${fmt(a.impressions)}</div>
+          <div class="sub ${pctClass(seg.imp_change_pct)}">${sign(seg.imp_change_pct)}</div></div>
+      </div>
+      <div class="metric-grid" style="margin-bottom:0">
+        <div class="metric"><div class="label">Position</div>
+          <div class="value">${b.avg_position} → ${a.avg_position}</div>
+          <div class="sub ${pctClass(seg.pos_change, true)}">${sign(seg.pos_change, "")}</div></div>
+        <div class="metric"><div class="label">CTR</div>
+          <div class="value">${(b.ctr*100).toFixed(1)}% → ${(a.ctr*100).toFixed(1)}%</div>
+          <div class="sub ${pctClass(seg.ctr_change_pp)}">${sign(seg.ctr_change_pp, "pp")}</div></div>
+      </div>
+    </div>`;
+}
+
+function moverTable(rows) {
+  if (!rows || !rows.length) return '<p class="subtitle">No data</p>';
+  const body = rows.map(r => `
+    <tr>
+      <td title="${r.page}">${r.page}</td>
+      <td>${r.clicks_before}</td>
+      <td>${r.clicks_after}</td>
+      <td class="${r.click_change >= 0 ? "up" : "down"}">${sign(r.click_change, "")}</td>
+      <td>${r.pos_before} → ${r.pos_after}</td>
+    </tr>`).join("");
+  return `<table>
+    <thead><tr><th>Page</th><th>Before</th><th>After</th><th>Change</th><th>Position</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+let clicksChart, ctrChart;
+
+function dayLabels(n) { return Array.from({length: n}, (_, i) => "Day " + (i+1)); }
+
+function drawClicks(daily) {
+  const n = Math.max(daily.category_after.length, daily.product_after.length);
+  const ctx = document.getElementById("clicksChart");
+  if (clicksChart) clicksChart.destroy();
+  clicksChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: dayLabels(n),
+      datasets: [
+        { label: "Cat after", data: daily.category_after.map(r => r.clicks), borderColor: "#1d9e75", backgroundColor: "rgba(29,158,117,.06)", fill: true, tension: .3, pointRadius: 4, borderWidth: 2.5 },
+        { label: "Cat before", data: daily.category_before.map(r => r.clicks), borderColor: "rgba(29,158,117,.35)", borderDash: [5,3], fill: false, tension: .3, pointRadius: 3, borderWidth: 2 },
+        { label: "Prod after", data: daily.product_after.map(r => r.clicks), borderColor: "#378add", backgroundColor: "rgba(55,138,221,.06)", fill: true, tension: .3, pointRadius: 4, borderWidth: 2.5 },
+        { label: "Prod before", data: daily.product_before.map(r => r.clicks), borderColor: "rgba(55,138,221,.35)", borderDash: [5,3], fill: false, tension: .3, pointRadius: 3, borderWidth: 2 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: "Daily clicks" }, grid: { color: "rgba(128,128,128,.1)" } }, x: { grid: { display: false } } },
+      plugins: { legend: { display: false }, title: { display: true, text: "Daily clicks: before (dashed) vs after (solid)", font: { size: 14, weight: "500" }, padding: { bottom: 14 } } }
+    }
+  });
+}
+
+function drawCtr(daily) {
+  const n = Math.max(daily.category_after.length, daily.product_after.length);
+  const ctx = document.getElementById("ctrChart");
+  if (ctrChart) ctrChart.destroy();
+  ctrChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: dayLabels(n),
+      datasets: [
+        { label: "Category", data: daily.category_after.map(r => (r.ctr*100).toFixed(1)), borderColor: "#1d9e75", fill: false, tension: .3, pointRadius: 4, borderWidth: 2.5 },
+        { label: "Product", data: daily.product_after.map(r => (r.ctr*100).toFixed(1)), borderColor: "#378add", fill: false, tension: .3, pointRadius: 4, borderWidth: 2.5 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: "CTR %" }, grid: { color: "rgba(128,128,128,.1)" }, ticks: { callback: v => v + "%" } }, x: { grid: { display: false } } },
+      plugins: { legend: { display: false }, title: { display: true, text: "Current-week CTR by page type", font: { size: 14, weight: "500" }, padding: { bottom: 14 } } }
+    }
+  });
+}
+
+document.getElementById("runBtn").addEventListener("click", () => {
+  const p = currentPickerParams();
+  if (!p.before_start || !p.before_end || !p.after_start || !p.after_end) {
+    alert("Please fill in all four dates.");
+    return;
+  }
+  load(p);
+});
+
+document.getElementById("resetBtn").addEventListener("click", () => {
+  load();  // no params = backend default (current week vs 4 weeks ago)
+});
+
+load();
+</script>
+</body>
+</html>
