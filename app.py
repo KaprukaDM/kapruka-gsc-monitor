@@ -51,16 +51,17 @@ def _gsc_service():
 # ─────────────────────────────────────────────────────────────────────────────
 # FIX #1: Paginated GSC fetch — pulls ALL rows instead of capping at 25K
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_gsc(service, start, end, row_limit=25000):
+def fetch_gsc(service, start, end, row_limit=25000, max_pages=4):
     """
     Paginate through GSC API results using startRow.
-    The API returns max 25,000 rows per request. If the result set is larger,
-    we keep fetching until we get fewer rows than the limit.
+    The API returns max 25,000 rows per request. Cap at max_pages iterations
+    (default 4 = 100K rows) to stay within gunicorn worker timeout.
     """
     all_records = []
     start_row = 0
+    page = 0
 
-    while True:
+    while page < max_pages:
         body = {
             "startDate": start,
             "endDate": end,
@@ -87,6 +88,7 @@ def fetch_gsc(service, start, end, row_limit=25000):
             break
 
         start_row += row_limit
+        page += 1
 
     return pd.DataFrame(all_records)
 
