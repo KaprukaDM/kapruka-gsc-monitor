@@ -66,7 +66,7 @@ def _build_query_filters():
     for term in BRANDED_QUERY_TERMS:
         filters.append({
             "dimension": "query",
-            "operator": "notContaining",
+            "operator": "notContains",
             "expression": term,
         })
     return [{"filters": filters}]
