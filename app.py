@@ -37,8 +37,17 @@ LIQUOR_PAGE = re.compile(
     re.IGNORECASE,
 )
 
-PRODUCT_RE  = re.compile(r"/lk[st]?/buyonline/")
-CATEGORY_RE = re.compile(r"/lk[st]?/online/")
+PRODUCT_RE  = re.compile(r"/buyonline/")
+CATEGORY_RE = re.compile(r"/online/")
+
+# Legacy short category URLs like /online/fruitbaskets or /online/sports
+# (no /lk/ prefix, no /price/ segment) still get stray impressions in GSC
+# with wildly inaccurate position data. Exclude them to prevent phantom
+# "position drop" entries. Matches /online/X but NOT /lk/online/X or /online/X/price/Y
+LEGACY_SHORT_URL = re.compile(
+    r"kapruka\.com/online/[^/]+/?$",
+    re.IGNORECASE,
+)
 
 
 def _gsc_service():
@@ -56,11 +65,7 @@ def _gsc_service():
 def _build_query_filters():
     """
     Build GSC API dimension filters that exclude branded/noise queries
-    server-side AND restrict to /lk/ paths only.
-
-    Legacy non-/lk/ URLs (e.g. /online/fruitbaskets) still get tiny
-    impressions in GSC but with wildly wrong position data. Excluding
-    them prevents phantom "position drops" in the dashboard.
+    server-side.
 
     GSC API filters within a single filterGroup are ANDed together.
     """
@@ -71,12 +76,6 @@ def _build_query_filters():
             "operator": "notContains",
             "expression": term,
         })
-    # Only fetch pages under the live /lk/ path structure
-    filters.append({
-        "dimension": "page",
-        "operator": "contains",
-        "expression": "/lk/",
-    })
     return [{"filters": filters}]
 
 
@@ -127,12 +126,15 @@ def fetch_gsc(service, start, end, row_limit=25000):
 
 
 def clean_and_tag(df):
-    """Post-fetch filtering: remove liquor pages, tag product/category."""
+    """Post-fetch filtering: remove liquor pages + legacy short URLs, tag product/category."""
     if df.empty:
         return df
     # Query noise is already filtered at the API level.
-    # Only liquor PAGE filtering remains here (can't do URL regex in GSC API).
+    # Remove liquor pages (can't do URL regex in GSC API).
     df = df[~df["page"].str.contains(LIQUOR_PAGE, na=False)].copy()
+    # Remove legacy short /online/X URLs (no /lk/, no /price/) — they have
+    # stray impressions with wildly wrong position data.
+    df = df[~df["page"].str.contains(LEGACY_SHORT_URL, na=False)].copy()
 
     def tag(url):
         if PRODUCT_RE.search(url):
