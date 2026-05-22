@@ -22,7 +22,7 @@ GSC_REFRESH_TOKEN    = os.environ.get("GSC_REFRESH_TOKEN", "")
 GSC_SITE_URL         = os.environ.get("GSC_SITE_URL", "https://www.kapruka.com")
 
 # Branded + known non-organic query terms
-NOISE_PATTERN = re.compile(r"\b(kapruka|liq[ou]r|liquor|pizza|dlb|dbl)\b", re.IGNORECASE)
+NOISE_PATTERN = re.compile(r"\b(?:kapruka|liq[ou]r|liquor|pizza|dlb|dbl)\b", re.IGNORECASE)
 
 # Liquor product PAGES (filtered by URL, not just query)
 LIQUOR_PAGE = re.compile(
@@ -142,8 +142,19 @@ def page_movers(df_before, df_after, page_type, n=10):
 
     b = psum(df_before)
     a = psum(df_after)
+    if a.empty and b.empty:
+        return [], [], [], []
     m = a.merge(b, on="page", suffixes=("_after", "_before"), how="outer").fillna(0)
+    # Ensure all expected columns exist even if one side was empty
+    num_cols = ["clicks_after", "clicks_before", "impressions_after",
+                "impressions_before", "avg_position_after", "avg_position_before"]
+    for col in num_cols:
+        if col not in m.columns:
+            m[col] = 0
+        m[col] = pd.to_numeric(m[col], errors="coerce").fillna(0)
     m["click_change"] = m["clicks_after"] - m["clicks_before"]
+    # Higher position number = worse rank, so a positive change = dropped
+    m["pos_change"] = m["avg_position_after"] - m["avg_position_before"]
 
     def fmt(row):
         return {
@@ -153,11 +164,33 @@ def page_movers(df_before, df_after, page_type, n=10):
             "click_change": int(row["click_change"]),
             "pos_before": round(row["avg_position_before"], 1),
             "pos_after": round(row["avg_position_after"], 1),
+            "pos_change": round(row["pos_change"], 1),
+            "impressions_before": int(row["impressions_before"]),
+            "impressions_after": int(row["impressions_after"]),
         }
 
     gainers = [fmt(r) for _, r in m.nlargest(n, "click_change").iterrows()]
     losers = [fmt(r) for _, r in m.nsmallest(n, "click_change").iterrows()]
-    return gainers, losers
+
+    # Position drops: only pages that ranked in BOTH periods (real comparison)
+    # and had meaningful visibility, sorted by biggest rank drop.
+    ranked_both = m[
+        (m["avg_position_before"] > 0)
+        & (m["avg_position_after"] > 0)
+        & (m["impressions_before"] >= 10)
+        & (m["impressions_after"] >= 10)
+    ]
+    pos_droppers = [
+        fmt(r) for _, r in ranked_both.nlargest(n, "pos_change").iterrows()
+        if r["pos_change"] > 0
+    ]
+
+    # Emerging pages: had ZERO clicks in the before period, now getting clicks.
+    # Brand-new winners that didn't exist in the comparison window.
+    emerging_df = m[(m["clicks_before"] == 0) & (m["clicks_after"] > 0)]
+    emerging = [fmt(r) for _, r in emerging_df.nlargest(n, "clicks_after").iterrows()]
+
+    return gainers, losers, pos_droppers, emerging
 
 
 def compute_comparison(before_start, before_end, after_start, after_end):
@@ -183,13 +216,21 @@ def compute_comparison(before_start, before_end, after_start, after_end):
             "ctr_change_pp": round((a["ctr"] - b["ctr"]) * 100, 2),
         }
 
-    cat_gainers, cat_losers = page_movers(raw_before, raw_after, "category")
-    prod_gainers, prod_losers = page_movers(raw_before, raw_after, "product")
+    cat_gainers, cat_losers, cat_pos_drops, cat_emerging = page_movers(raw_before, raw_after, "category")
+    prod_gainers, prod_losers, prod_pos_drops, prod_emerging = page_movers(raw_before, raw_after, "product")
 
     return {
         "periods": {
             "before": {"start": before_start, "end": before_end},
             "after": {"start": after_start, "end": after_end},
+        },
+        "filters": {
+            "queries": ["kapruka", "liquor / liqor", "pizza", "dlb", "dbl"],
+            "liquor_pages": [
+                "whisky", "brandy", "vodka", "arrack", "beer", "wine", "rum",
+                "gin", "champagne", "cognac", "scotch", "bourbon", "and named "
+                "liquor brands (Old Keg, VAT 9, Carlsberg, Heineken, etc.)",
+            ],
         },
         "comparison": comparison,
         "daily": {
@@ -199,8 +240,10 @@ def compute_comparison(before_start, before_end, after_start, after_end):
             "product_after": daily_series(raw_after, "product"),
         },
         "movers": {
-            "category": {"gainers": cat_gainers, "losers": cat_losers},
-            "product": {"gainers": prod_gainers, "losers": prod_losers},
+            "category": {"gainers": cat_gainers, "losers": cat_losers,
+                         "pos_drops": cat_pos_drops, "emerging": cat_emerging},
+            "product": {"gainers": prod_gainers, "losers": prod_losers,
+                        "pos_drops": prod_pos_drops, "emerging": prod_emerging},
         },
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
     }
