@@ -37,8 +37,8 @@ LIQUOR_PAGE = re.compile(
     re.IGNORECASE,
 )
 
-PRODUCT_RE  = re.compile(r"/buyonline/")
-CATEGORY_RE = re.compile(r"/online/")
+PRODUCT_RE  = re.compile(r"/lk[st]?/buyonline/")
+CATEGORY_RE = re.compile(r"/lk[st]?/online/")
 
 
 def _gsc_service():
@@ -56,11 +56,13 @@ def _gsc_service():
 def _build_query_filters():
     """
     Build GSC API dimension filters that exclude branded/noise queries
-    server-side. This drastically reduces the row count returned, avoiding
-    memory issues and timeouts on small Render instances.
+    server-side AND restrict to /lk/ paths only.
 
-    GSC API filters within a single filterGroup are ANDed together,
-    so "notContaining kapruka" AND "notContaining liquor" AND ... works.
+    Legacy non-/lk/ URLs (e.g. /online/fruitbaskets) still get tiny
+    impressions in GSC but with wildly wrong position data. Excluding
+    them prevents phantom "position drops" in the dashboard.
+
+    GSC API filters within a single filterGroup are ANDed together.
     """
     filters = []
     for term in BRANDED_QUERY_TERMS:
@@ -69,6 +71,12 @@ def _build_query_filters():
             "operator": "notContains",
             "expression": term,
         })
+    # Only fetch pages under the live /lk/ path structure
+    filters.append({
+        "dimension": "page",
+        "operator": "contains",
+        "expression": "/lk/",
+    })
     return [{"filters": filters}]
 
 
