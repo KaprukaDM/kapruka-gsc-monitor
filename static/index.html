@@ -40,6 +40,12 @@
   .subtitle { font-size: 13px; color: var(--text-2); margin-bottom: 20px; }
   .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .datebar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .datebar-label { font-size: 13px; color: var(--text-2); font-weight: 500; }
+  .preset-group { display: inline-flex; background: var(--secondary); border-radius: 8px; padding: 3px; gap: 2px; }
+  .preset { font-size: 13px; padding: 6px 12px; border-radius: 6px; border: none; background: transparent; color: var(--text-2); cursor: pointer; }
+  .preset:hover { background: var(--card); }
+  .preset.active { background: var(--card); color: var(--text); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .custom-range { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; padding: 12px; background: var(--secondary); border-radius: 10px; }
   .dategroup { display: flex; align-items: center; gap: 6px; background: var(--secondary); padding: 6px 10px; border-radius: 8px; }
   .dategroup-label { font-size: 12px; color: var(--text-2); font-weight: 500; margin-right: 2px; }
   .arrow { color: var(--text-3); font-size: 13px; }
@@ -79,12 +85,20 @@
   .legend span { display: flex; align-items: center; gap: 5px; }
   .legend .dot { width: 10px; height: 10px; }
   .section-title { font-size: 14px; font-weight: 500; margin: 4px 0 10px; }
+  .section-note { font-size: 12px; color: var(--text-2); margin: -6px 0 10px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px; }
   th { text-align: right; font-size: 12px; color: var(--text-2); font-weight: 400; padding: 8px 6px; border-bottom: 0.5px solid var(--border); }
   th:first-child { text-align: left; }
   td { padding: 8px 6px; border-bottom: 0.5px solid var(--border); text-align: right; }
   td:first-child { text-align: left; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .loading { text-align: center; padding: 60px; color: var(--text-2); }
+  .filter-note {
+    background: var(--secondary); border-radius: 10px; padding: 10px 14px;
+    font-size: 12px; color: var(--text-2); margin-bottom: 18px; line-height: 1.5;
+  }
+  .filter-note b { color: var(--text); font-weight: 500; }
+  .pos-worse { color: var(--red); }
+  .pos-better { color: var(--green); }
   .error { background: var(--red-bg); color: var(--red); padding: 16px; border-radius: 10px; }
   @media (max-width: 720px) {
     .kpi-row { grid-template-columns: 1fr 1fr; }
@@ -99,6 +113,17 @@
 </header>
 
 <div class="datebar">
+  <span class="datebar-label">Compare current week vs:</span>
+  <div class="preset-group" id="presetGroup">
+    <button class="preset active" data-weeks="4">1 month ago</button>
+    <button class="preset" data-weeks="1">Last week</button>
+    <button class="preset" data-weeks="8">2 months ago</button>
+    <button class="preset" data-weeks="12">3 months ago</button>
+  </div>
+  <button id="customToggle">Custom dates</button>
+</div>
+
+<div class="custom-range" id="customRange" style="display:none;">
   <div class="dategroup">
     <span class="dategroup-label">Before</span>
     <input type="date" id="beforeStart" />
@@ -112,9 +137,9 @@
     <input type="date" id="afterEnd" />
   </div>
   <button class="primary" id="runBtn">Compare</button>
-  <button id="resetBtn">Reset to default</button>
 </div>
 <div class="subtitle" id="periodLabel">Loading…</div>
+<div class="filter-note" id="filterNote"></div>
 
 <div id="content">
   <div class="loading">Pulling Search Console data…</div>
@@ -130,6 +155,21 @@ function pctClass(v, invert=false) {
   return positive ? "up" : "down";
 }
 function sign(v, suffix="%") { return (v > 0 ? "+" : "") + v + suffix; }
+
+// Compute a before/after window: current week vs N weeks earlier.
+// After = last 7 days ending 3 days back (GSC data lag). Before = same span N weeks before.
+function presetParams(weeksAgo) {
+  const iso = d => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const afterEnd = new Date(today); afterEnd.setDate(today.getDate() - 3);
+  const afterStart = new Date(today); afterStart.setDate(today.getDate() - 9);
+  const beforeEnd = new Date(today); beforeEnd.setDate(today.getDate() - 3 - weeksAgo * 7);
+  const beforeStart = new Date(today); beforeStart.setDate(today.getDate() - 9 - weeksAgo * 7);
+  return {
+    before_start: iso(beforeStart), before_end: iso(beforeEnd),
+    after_start: iso(afterStart), after_end: iso(afterEnd),
+  };
+}
 
 async function load(params) {
   document.getElementById("content").innerHTML = '<div class="loading">Pulling Search Console data…</div>';
@@ -167,6 +207,14 @@ function render(d) {
   document.getElementById("genTime").textContent =
     "Pulled " + new Date(d.generated_at).toLocaleString();
 
+  if (d.filters) {
+    document.getElementById("filterNote").innerHTML =
+      `<b>What's filtered out:</b> Branded &amp; non-organic search queries containing ` +
+      d.filters.queries.map(q => "“" + q + "”").join(", ") +
+      `. Liquor product pages are also excluded (whisky, brandy, vodka, beer, wine, etc. ` +
+      `and named liquor brands). Positions are impression-weighted; CTR is true clicks ÷ impressions.`;
+  }
+
   const all = c.ALL;
   const kpis = `
     <div class="kpi-row">
@@ -201,10 +249,20 @@ function render(d) {
     <div class="chart-wrap"><canvas id="ctrChart"></canvas></div>`;
 
   const tables = `
-    <div class="section-title">Top category gainers</div>
+    <div class="section-title">Top category gainers (by clicks)</div>
     ${moverTable(d.movers.category.gainers)}
-    <div class="section-title">Top product gainers</div>
-    ${moverTable(d.movers.product.gainers)}`;
+    <div class="section-title">Top product gainers (by clicks)</div>
+    ${moverTable(d.movers.product.gainers)}
+    <div class="section-title">New emerging category pages</div>
+    <p class="section-note">Getting clicks now but had zero in the before period — brand-new winners.</p>
+    ${emergingTable(d.movers.category.emerging)}
+    <div class="section-title">New emerging product pages</div>
+    <p class="section-note">Getting clicks now but had zero in the before period — brand-new winners.</p>
+    ${emergingTable(d.movers.product.emerging)}
+    <div class="section-title">Category pages losing position</div>
+    ${posTable(d.movers.category.pos_drops)}
+    <div class="section-title">Product pages losing position</div>
+    ${posTable(d.movers.product.pos_drops)}`;
 
   document.getElementById("content").innerHTML = kpis + cards + charts + tables;
   drawClicks(d.daily);
@@ -251,7 +309,36 @@ function moverTable(rows) {
       <td>${r.pos_before} → ${r.pos_after}</td>
     </tr>`).join("");
   return `<table>
-    <thead><tr><th>Page</th><th>Before</th><th>After</th><th>Change</th><th>Position</th></tr></thead>
+    <thead><tr><th>Page</th><th>Clicks before</th><th>Clicks after</th><th>Change</th><th>Position</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function emergingTable(rows) {
+  if (!rows || !rows.length) return '<p class="subtitle">No new emerging pages this period.</p>';
+  const body = rows.map(r => `
+    <tr>
+      <td title="${r.page}">${r.page}</td>
+      <td class="up">${r.clicks_after}</td>
+      <td>${fmt(r.impressions_after)}</td>
+      <td>${r.pos_after}</td>
+    </tr>`).join("");
+  return `<table>
+    <thead><tr><th>Page</th><th>Clicks now</th><th>Impressions now</th><th>Position now</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function posTable(rows) {
+  if (!rows || !rows.length) return '<p class="subtitle">No pages lost position (good news).</p>';
+  const body = rows.map(r => `
+    <tr>
+      <td title="${r.page}">${r.page}</td>
+      <td>${r.pos_before}</td>
+      <td>${r.pos_after}</td>
+      <td class="pos-worse">+${r.pos_change}</td>
+      <td>${r.clicks_before} → ${r.clicks_after}</td>
+    </tr>`).join("");
+  return `<table>
+    <thead><tr><th>Page</th><th>Pos before</th><th>Pos after</th><th>Drop</th><th>Clicks</th></tr></thead>
     <tbody>${body}</tbody></table>`;
 }
 
@@ -303,20 +390,35 @@ function drawCtr(daily) {
   });
 }
 
+// Preset buttons
+document.querySelectorAll(".preset").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".preset").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("customRange").style.display = "none";
+    load(presetParams(parseInt(btn.dataset.weeks, 10)));
+  });
+});
+
+// Custom toggle
+document.getElementById("customToggle").addEventListener("click", () => {
+  const cr = document.getElementById("customRange");
+  cr.style.display = cr.style.display === "none" ? "flex" : "none";
+});
+
+// Custom compare
 document.getElementById("runBtn").addEventListener("click", () => {
   const p = currentPickerParams();
   if (!p.before_start || !p.before_end || !p.after_start || !p.after_end) {
     alert("Please fill in all four dates.");
     return;
   }
+  document.querySelectorAll(".preset").forEach(b => b.classList.remove("active"));
   load(p);
 });
 
-document.getElementById("resetBtn").addEventListener("click", () => {
-  load();  // no params = backend default (current week vs 4 weeks ago)
-});
-
-load();
+// Initial load = default (1 month ago, matches the active preset)
+load(presetParams(4));
 </script>
 </body>
 </html>
