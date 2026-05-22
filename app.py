@@ -40,15 +40,6 @@ LIQUOR_PAGE = re.compile(
 PRODUCT_RE  = re.compile(r"/buyonline/")
 CATEGORY_RE = re.compile(r"/online/")
 
-# Legacy short category URLs like /online/fruitbaskets or /online/sports
-# (no /lk/ prefix, no /price/ segment) still get stray impressions in GSC
-# with wildly inaccurate position data. Exclude them to prevent phantom
-# "position drop" entries. Matches /online/X but NOT /lk/online/X or /online/X/price/Y
-LEGACY_SHORT_URL = re.compile(
-    r"kapruka\.com/online/[^/]+/?$",
-    re.IGNORECASE,
-)
-
 
 def _gsc_service():
     creds = Credentials(
@@ -65,7 +56,7 @@ def _gsc_service():
 def _build_query_filters():
     """
     Build GSC API dimension filters that exclude branded/noise queries
-    server-side.
+    server-side AND exclude /lk/ paths (we only track .com paths).
 
     GSC API filters within a single filterGroup are ANDed together.
     """
@@ -76,6 +67,12 @@ def _build_query_filters():
             "operator": "notContains",
             "expression": term,
         })
+    # Exclude /lk/ paths — only track kapruka.com domain paths
+    filters.append({
+        "dimension": "page",
+        "operator": "notContains",
+        "expression": "/lk/",
+    })
     return [{"filters": filters}]
 
 
@@ -126,15 +123,12 @@ def fetch_gsc(service, start, end, row_limit=25000):
 
 
 def clean_and_tag(df):
-    """Post-fetch filtering: remove liquor pages + legacy short URLs, tag product/category."""
+    """Post-fetch filtering: remove liquor pages, tag product/category."""
     if df.empty:
         return df
-    # Query noise is already filtered at the API level.
+    # Query noise and /lk/ paths already filtered at the API level.
     # Remove liquor pages (can't do URL regex in GSC API).
     df = df[~df["page"].str.contains(LIQUOR_PAGE, na=False)].copy()
-    # Remove legacy short /online/X URLs (no /lk/, no /price/) — they have
-    # stray impressions with wildly wrong position data.
-    df = df[~df["page"].str.contains(LEGACY_SHORT_URL, na=False)].copy()
 
     def tag(url):
         if PRODUCT_RE.search(url):
