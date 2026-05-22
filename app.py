@@ -48,28 +48,47 @@ def _gsc_service():
     return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX #1: Paginated GSC fetch — pulls ALL rows instead of capping at 25K
+# ─────────────────────────────────────────────────────────────────────────────
 def fetch_gsc(service, start, end, row_limit=25000):
-    body = {
-        "startDate": start,
-        "endDate": end,
-        "dimensions": ["date", "query", "page"],
-        "rowLimit": row_limit,
-        "dataState": "final",
-    }
-    resp = service.searchanalytics().query(siteUrl=GSC_SITE_URL, body=body).execute()
-    rows = resp.get("rows", [])
-    records = [
-        {
-            "date": r["keys"][0],
-            "query": r["keys"][1],
-            "page": r["keys"][2],
-            "clicks": r.get("clicks", 0),
-            "impressions": r.get("impressions", 0),
-            "position": r.get("position", 0),
+    """
+    Paginate through GSC API results using startRow.
+    The API returns max 25,000 rows per request. If the result set is larger,
+    we keep fetching until we get fewer rows than the limit.
+    """
+    all_records = []
+    start_row = 0
+
+    while True:
+        body = {
+            "startDate": start,
+            "endDate": end,
+            "dimensions": ["date", "query", "page"],
+            "rowLimit": row_limit,
+            "startRow": start_row,
+            "dataState": "final",
         }
-        for r in rows
-    ]
-    return pd.DataFrame(records)
+        resp = service.searchanalytics().query(siteUrl=GSC_SITE_URL, body=body).execute()
+        rows = resp.get("rows", [])
+
+        for r in rows:
+            all_records.append({
+                "date": r["keys"][0],
+                "query": r["keys"][1],
+                "page": r["keys"][2],
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "position": r.get("position", 0),
+            })
+
+        # If we got fewer rows than the limit, we've reached the end
+        if len(rows) < row_limit:
+            break
+
+        start_row += row_limit
+
+    return pd.DataFrame(all_records)
 
 
 def clean_and_tag(df):
@@ -193,10 +212,23 @@ def page_movers(df_before, df_after, page_type, n=10):
     return gainers, losers, pos_droppers, emerging
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX #2: Surface row counts + pagination info so you can verify completeness
+# ─────────────────────────────────────────────────────────────────────────────
 def compute_comparison(before_start, before_end, after_start, after_end):
     service = _gsc_service()
-    raw_before = clean_and_tag(fetch_gsc(service, before_start, before_end))
-    raw_after = clean_and_tag(fetch_gsc(service, after_start, after_end))
+    raw_before_full = fetch_gsc(service, before_start, before_end)
+    raw_after_full = fetch_gsc(service, after_start, after_end)
+
+    # Track raw row counts before filtering
+    rows_before_raw = len(raw_before_full)
+    rows_after_raw = len(raw_after_full)
+
+    raw_before = clean_and_tag(raw_before_full)
+    raw_after = clean_and_tag(raw_after_full)
+
+    rows_before_clean = len(raw_before)
+    rows_after_clean = len(raw_after)
 
     sum_b = summarize(raw_before)
     sum_a = summarize(raw_after)
@@ -232,6 +264,13 @@ def compute_comparison(before_start, before_end, after_start, after_end):
                 "liquor brands (Old Keg, VAT 9, Carlsberg, Heineken, etc.)",
             ],
         },
+        # Row counts for transparency — verify data completeness
+        "row_counts": {
+            "before_raw": rows_before_raw,
+            "before_after_filters": rows_before_clean,
+            "after_raw": rows_after_raw,
+            "after_after_filters": rows_after_clean,
+        },
         "comparison": comparison,
         "daily": {
             "category_before": daily_series(raw_before, "category"),
@@ -249,12 +288,18 @@ def compute_comparison(before_start, before_end, after_start, after_end):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX #3: Push "after" window back to 4 days instead of 3 for safer final data
+# ─────────────────────────────────────────────────────────────────────────────
 def default_periods():
     today = datetime.date.today()
-    after_end = today - datetime.timedelta(days=3)
-    after_start = today - datetime.timedelta(days=9)
-    before_end = today - datetime.timedelta(days=3 + 28)
-    before_start = today - datetime.timedelta(days=9 + 28)
+    # GSC data takes 2-4 days to finalize. Using 4-day lag to avoid
+    # partial data in the "after" window understating real numbers.
+    lag = 4
+    after_end = today - datetime.timedelta(days=lag)
+    after_start = today - datetime.timedelta(days=lag + 6)
+    before_end = today - datetime.timedelta(days=lag + 28)
+    before_start = today - datetime.timedelta(days=lag + 6 + 28)
     return (before_start.isoformat(), before_end.isoformat(),
             after_start.isoformat(), after_end.isoformat())
 
