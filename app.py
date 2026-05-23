@@ -2,6 +2,13 @@
 Kapruka GSC Before/After Monitor
 Flask backend that pulls Search Console data, filters branded + liquor noise,
 and computes weighted before-vs-after comparisons for product & category pages.
+
+Data accuracy notes:
+- Branded query filtering done at GSC API level (notContains)
+- Liquor page filtering done post-fetch (URL regex)
+- KPI totals use page-level aggregation (fewer rows, complete data)
+- Movers tables use query+page granularity (may be sampled for very large sites)
+- Site property: https://www.kapruka.com (includes all paths: /online/, /lk/online/, etc.)
 """
 import os
 import re
@@ -22,14 +29,13 @@ GSC_REFRESH_TOKEN    = os.environ.get("GSC_REFRESH_TOKEN", "")
 GSC_SITE_URL         = os.environ.get("GSC_SITE_URL", "https://www.kapruka.com")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Filters — branded queries excluded at the API level, liquor pages post-filter
+# Filters
 # ─────────────────────────────────────────────────────────────────────────────
 
-# These are pushed into the GSC API dimensionFilterGroups so rows never
-# arrive in memory. Each becomes a "query notContaining X" filter.
+# Branded/noise query terms — excluded at the GSC API level
 BRANDED_QUERY_TERMS = ["kapruka", "liquor", "liqor", "pizza", "dlb", "dbl"]
 
-# Liquor product PAGES (filtered post-fetch by URL pattern)
+# Liquor product PAGES — excluded post-fetch by URL pattern
 LIQUOR_PAGE = re.compile(
     r"(?:liq|whisky|whiskey|brandy|vodka|arrack|beer|wine|rum|gin|champagne|cognac|"
     r"scotch|bourbon|abv|somersby|carlsberg|heineken|jack.daniel|johnnie.walker|"
@@ -37,8 +43,12 @@ LIQUOR_PAGE = re.compile(
     re.IGNORECASE,
 )
 
+# Page type detection — matches both /online/ and /lk/online/, /buyonline/ and /lk/buyonline/
 PRODUCT_RE  = re.compile(r"/buyonline/")
 CATEGORY_RE = re.compile(r"/online/")
+
+# Pages to exclude: /lk/ prefixed paths (we only track kapruka.com domain paths)
+EXCLUDE_LK = re.compile(r"kapruka\.com/lk[st]?/", re.IGNORECASE)
 
 
 def _gsc_service():
@@ -53,12 +63,14 @@ def _gsc_service():
     return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
 
-def _build_query_filters():
+def _brand_filters():
     """
-    Build GSC API dimension filters that exclude branded/noise queries
-    server-side AND exclude /lk/ paths (we only track .com paths).
+    GSC API dimension filters to exclude branded/noise queries.
+    Filters within a single group are ANDed.
 
-    GSC API filters within a single filterGroup are ANDed together.
+    NOTE: We do NOT filter /lk/ at the API level because "notContains /lk/"
+    would also exclude legitimate pages. Instead, /lk/ exclusion is done
+    post-fetch in clean_and_tag() where we can use proper regex.
     """
     filters = []
     for term in BRANDED_QUERY_TERMS:
@@ -67,32 +79,26 @@ def _build_query_filters():
             "operator": "notContains",
             "expression": term,
         })
-    # Exclude /lk/ paths — only track kapruka.com domain paths
-    filters.append({
-        "dimension": "page",
-        "operator": "notContains",
-        "expression": "/lk/",
-    })
     return [{"filters": filters}]
 
 
-def fetch_gsc(service, start, end, row_limit=25000):
+def fetch_gsc_pages(service, start, end, row_limit=25000):
     """
-    Single-pass GSC fetch with server-side query filtering.
-    Branded/noise queries are excluded by the API itself, so the result
-    set is small enough to fit in one 25K-row page for a 7-day window.
+    Fetch page-level data (dimensions: date + page only).
+    This produces far fewer rows than date+query+page, so we can
+    get complete data without hitting row limits.
+    Used for: KPI totals, daily series, position tracking.
     """
     all_records = []
     start_row = 0
-
-    query_filters = _build_query_filters()
+    dim_filters = _brand_filters()
 
     while True:
         body = {
             "startDate": start,
             "endDate": end,
-            "dimensions": ["date", "query", "page"],
-            "dimensionFilterGroups": query_filters,
+            "dimensions": ["date", "page"],
+            "dimensionFilterGroups": dim_filters,
             "rowLimit": row_limit,
             "startRow": start_row,
             "dataState": "final",
@@ -103,8 +109,7 @@ def fetch_gsc(service, start, end, row_limit=25000):
         for r in rows:
             all_records.append({
                 "date": r["keys"][0],
-                "query": r["keys"][1],
-                "page": r["keys"][2],
+                "page": r["keys"][1],
                 "clicks": r.get("clicks", 0),
                 "impressions": r.get("impressions", 0),
                 "position": r.get("position", 0),
@@ -112,22 +117,67 @@ def fetch_gsc(service, start, end, row_limit=25000):
 
         if len(rows) < row_limit:
             break
-
         start_row += row_limit
+        # Safety: 5 pages = 125K rows
+        if start_row >= row_limit * 5:
+            break
 
-        # Safety cap: 3 pages = 75K rows max to prevent runaway memory
-        if start_row >= row_limit * 3:
+    return pd.DataFrame(all_records)
+
+
+def fetch_gsc_queries(service, start, end, row_limit=25000):
+    """
+    Fetch query+page level data (dimensions: query + page).
+    More rows than page-only, but needed for movers tables.
+    No date dimension to keep row count manageable.
+    """
+    all_records = []
+    start_row = 0
+    dim_filters = _brand_filters()
+
+    while True:
+        body = {
+            "startDate": start,
+            "endDate": end,
+            "dimensions": ["query", "page"],
+            "dimensionFilterGroups": dim_filters,
+            "rowLimit": row_limit,
+            "startRow": start_row,
+            "dataState": "final",
+        }
+        resp = service.searchanalytics().query(siteUrl=GSC_SITE_URL, body=body).execute()
+        rows = resp.get("rows", [])
+
+        for r in rows:
+            all_records.append({
+                "query": r["keys"][0],
+                "page": r["keys"][1],
+                "clicks": r.get("clicks", 0),
+                "impressions": r.get("impressions", 0),
+                "position": r.get("position", 0),
+            })
+
+        if len(rows) < row_limit:
+            break
+        start_row += row_limit
+        if start_row >= row_limit * 5:
             break
 
     return pd.DataFrame(all_records)
 
 
 def clean_and_tag(df):
-    """Post-fetch filtering: remove liquor pages, tag product/category."""
+    """
+    Post-fetch filtering and tagging.
+    - Removes /lk/ prefixed paths (only tracking kapruka.com paths)
+    - Removes liquor product pages
+    - Tags remaining pages as product/category/other
+    """
     if df.empty:
         return df
-    # Query noise and /lk/ paths already filtered at the API level.
-    # Remove liquor pages (can't do URL regex in GSC API).
+    # Exclude /lk/, /lks/, /lkt/ prefixed paths
+    df = df[~df["page"].str.contains(EXCLUDE_LK, na=False)].copy()
+    # Exclude liquor pages
     df = df[~df["page"].str.contains(LIQUOR_PAGE, na=False)].copy()
 
     def tag(url):
@@ -157,7 +207,7 @@ def summarize(df):
             "avg_position": pos,
             "ctr": ctr,
             "unique_pages": int(sub["page"].nunique()),
-            "unique_queries": int(sub["query"].nunique()),
+            "unique_queries": 0,  # Not available in page-level fetch
         }
     return out
 
@@ -179,6 +229,10 @@ def daily_series(df, page_type):
 
 
 def page_movers(df_before, df_after, page_type, n=10):
+    """
+    Compare pages between periods using query-level data.
+    Aggregates to page level for comparison.
+    """
     def psum(df):
         sub = df[df["page_type"] == page_type]
         if sub.empty:
@@ -241,23 +295,24 @@ def page_movers(df_before, df_after, page_type, n=10):
 
 def compute_comparison(before_start, before_end, after_start, after_end):
     service = _gsc_service()
-    raw_before_full = fetch_gsc(service, before_start, before_end)
-    raw_after_full = fetch_gsc(service, after_start, after_end)
 
-    rows_before_raw = len(raw_before_full)
-    rows_after_raw = len(raw_after_full)
+    # ── Page-level fetch: complete data for KPIs, charts, positions ──
+    pages_before = clean_and_tag(fetch_gsc_pages(service, before_start, before_end))
+    pages_after = clean_and_tag(fetch_gsc_pages(service, after_start, after_end))
 
-    raw_before = clean_and_tag(raw_before_full)
-    raw_after = clean_and_tag(raw_after_full)
+    sum_b = summarize(pages_before)
+    sum_a = summarize(pages_after)
 
-    # Free the unfiltered frames immediately
-    del raw_before_full, raw_after_full
+    # ── Query-level fetch: for movers tables (who gained/lost clicks) ──
+    queries_before = clean_and_tag(fetch_gsc_queries(service, before_start, before_end))
+    queries_after = clean_and_tag(fetch_gsc_queries(service, after_start, after_end))
 
-    rows_before_clean = len(raw_before)
-    rows_after_clean = len(raw_after)
-
-    sum_b = summarize(raw_before)
-    sum_a = summarize(raw_after)
+    # Unique query counts from query-level data
+    for pt in ["product", "category", "ALL"]:
+        for label, qdf in [("before", queries_before), ("after", queries_after)]:
+            sub = qdf if pt == "ALL" else qdf[qdf["page_type"] == pt]
+            target = sum_b if label == "before" else sum_a
+            target[pt]["unique_queries"] = int(sub["query"].nunique()) if "query" in sub.columns else 0
 
     def pct(a, b):
         return round((a / b - 1) * 100, 1) if b else 0
@@ -274,8 +329,25 @@ def compute_comparison(before_start, before_end, after_start, after_end):
             "ctr_change_pp": round((a["ctr"] - b["ctr"]) * 100, 2),
         }
 
-    cat_gainers, cat_losers, cat_pos_drops, cat_emerging = page_movers(raw_before, raw_after, "category")
-    prod_gainers, prod_losers, prod_pos_drops, prod_emerging = page_movers(raw_before, raw_after, "product")
+    cat_gainers, cat_losers, cat_pos_drops, cat_emerging = page_movers(queries_before, queries_after, "category")
+    prod_gainers, prod_losers, prod_pos_drops, prod_emerging = page_movers(queries_before, queries_after, "product")
+
+    # Build daily series BEFORE freeing page data
+    daily = {
+        "category_before": daily_series(pages_before, "category"),
+        "category_after": daily_series(pages_after, "category"),
+        "product_before": daily_series(pages_before, "product"),
+        "product_after": daily_series(pages_after, "product"),
+    }
+
+    # Row counts for transparency
+    page_rows_b = len(pages_before)
+    page_rows_a = len(pages_after)
+    query_rows_b = len(queries_before)
+    query_rows_a = len(queries_after)
+
+    # Free memory
+    del pages_before, pages_after, queries_before, queries_after
 
     return {
         "periods": {
@@ -289,20 +361,16 @@ def compute_comparison(before_start, before_end, after_start, after_end):
                 "gin", "champagne", "cognac", "scotch", "bourbon", "and named "
                 "liquor brands (Old Keg, VAT 9, Carlsberg, Heineken, etc.)",
             ],
+            "excluded_paths": ["/lk/", "/lks/", "/lkt/"],
         },
         "row_counts": {
-            "before_raw": rows_before_raw,
-            "before_after_filters": rows_before_clean,
-            "after_raw": rows_after_raw,
-            "after_after_filters": rows_after_clean,
+            "page_level_before": page_rows_b,
+            "page_level_after": page_rows_a,
+            "query_level_before": query_rows_b,
+            "query_level_after": query_rows_a,
         },
         "comparison": comparison,
-        "daily": {
-            "category_before": daily_series(raw_before, "category"),
-            "category_after": daily_series(raw_after, "category"),
-            "product_before": daily_series(raw_before, "product"),
-            "product_after": daily_series(raw_after, "product"),
-        },
+        "daily": daily,
         "movers": {
             "category": {"gainers": cat_gainers, "losers": cat_losers,
                          "pos_drops": cat_pos_drops, "emerging": cat_emerging},
