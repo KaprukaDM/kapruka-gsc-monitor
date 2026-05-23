@@ -226,8 +226,8 @@ function render(d) {
     const rc = d.row_counts;
     rowCountsHtml = `
       <div class="row-counts">
-        <span>Before: <span class="count">${fmt(rc.before_raw)}</span> rows fetched → <span class="count">${fmt(rc.before_after_filters)}</span> after filters</span>
-        <span>After: <span class="count">${fmt(rc.after_raw)}</span> rows fetched → <span class="count">${fmt(rc.after_after_filters)}</span> after filters</span>
+        <span>Page-level: <span class="count">${fmt(rc.page_level_before)}</span> before, <span class="count">${fmt(rc.page_level_after)}</span> after</span>
+        <span>Query-level: <span class="count">${fmt(rc.query_level_before)}</span> before, <span class="count">${fmt(rc.query_level_after)}</span> after</span>
       </div>`;
   }
 
