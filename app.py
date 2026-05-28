@@ -7,7 +7,6 @@ Data accuracy notes:
 - Branded query filtering done at GSC API level (notContains)
 - Liquor page filtering done post-fetch (URL regex)
 - KPI totals use page-level aggregation (fewer rows, complete data)
-- Movers tables use query+page granularity (may be sampled for very large sites)
 - Site property: https://www.kapruka.com (includes all paths: /online/, /lk/online/, etc.)
 """
 import os
@@ -67,10 +66,6 @@ def _brand_filters():
     """
     GSC API dimension filters to exclude branded/noise queries.
     Filters within a single group are ANDed.
-
-    NOTE: We do NOT filter /lk/ at the API level because "notContains /lk/"
-    would also exclude legitimate pages. Instead, /lk/ exclusion is done
-    post-fetch in clean_and_tag() where we can use proper regex.
     """
     filters = []
     for term in BRANDED_QUERY_TERMS:
@@ -128,8 +123,7 @@ def fetch_gsc_pages(service, start, end, row_limit=25000):
 def fetch_gsc_queries(service, start, end, row_limit=25000):
     """
     Fetch query+page level data (dimensions: query + page).
-    More rows than page-only, but needed for movers tables.
-    No date dimension to keep row count manageable.
+    Used only for unique-query counts in the KPI cards.
     """
     all_records = []
     start_row = 0
@@ -228,71 +222,6 @@ def daily_series(df, page_type):
     return g[["date", "clicks", "impressions", "avg_position", "ctr"]].to_dict("records")
 
 
-def page_movers(df_before, df_after, page_type, n=10):
-    """
-    Compare pages between periods using query-level data.
-    Aggregates to page level for comparison.
-    """
-    def psum(df):
-        sub = df[df["page_type"] == page_type]
-        if sub.empty:
-            return pd.DataFrame(columns=["page", "clicks", "impressions", "pos_weighted"])
-        g = (
-            sub.groupby("page")
-            .agg(clicks=("clicks", "sum"), impressions=("impressions", "sum"),
-                 pos_weighted=("pos_weighted", "sum"))
-            .reset_index()
-        )
-        g["avg_position"] = (g["pos_weighted"] / g["impressions"]).round(2)
-        return g
-
-    b = psum(df_before)
-    a = psum(df_after)
-    if a.empty and b.empty:
-        return [], [], [], []
-    m = a.merge(b, on="page", suffixes=("_after", "_before"), how="outer").fillna(0)
-    num_cols = ["clicks_after", "clicks_before", "impressions_after",
-                "impressions_before", "avg_position_after", "avg_position_before"]
-    for col in num_cols:
-        if col not in m.columns:
-            m[col] = 0
-        m[col] = pd.to_numeric(m[col], errors="coerce").fillna(0)
-    m["click_change"] = m["clicks_after"] - m["clicks_before"]
-    m["pos_change"] = m["avg_position_after"] - m["avg_position_before"]
-
-    def fmt(row):
-        return {
-            "page": row["page"].replace("https://www.kapruka.com", ""),
-            "clicks_before": int(row["clicks_before"]),
-            "clicks_after": int(row["clicks_after"]),
-            "click_change": int(row["click_change"]),
-            "pos_before": round(row["avg_position_before"], 1),
-            "pos_after": round(row["avg_position_after"], 1),
-            "pos_change": round(row["pos_change"], 1),
-            "impressions_before": int(row["impressions_before"]),
-            "impressions_after": int(row["impressions_after"]),
-        }
-
-    gainers = [fmt(r) for _, r in m.nlargest(n, "click_change").iterrows()]
-    losers = [fmt(r) for _, r in m.nsmallest(n, "click_change").iterrows()]
-
-    ranked_both = m[
-        (m["avg_position_before"] > 0)
-        & (m["avg_position_after"] > 0)
-        & (m["impressions_before"] >= 10)
-        & (m["impressions_after"] >= 10)
-    ]
-    pos_droppers = [
-        fmt(r) for _, r in ranked_both.nlargest(n, "pos_change").iterrows()
-        if r["pos_change"] > 0
-    ]
-
-    emerging_df = m[(m["clicks_before"] == 0) & (m["clicks_after"] > 0)]
-    emerging = [fmt(r) for _, r in emerging_df.nlargest(n, "clicks_after").iterrows()]
-
-    return gainers, losers, pos_droppers, emerging
-
-
 def compute_comparison(before_start, before_end, after_start, after_end):
     service = _gsc_service()
 
@@ -303,7 +232,7 @@ def compute_comparison(before_start, before_end, after_start, after_end):
     sum_b = summarize(pages_before)
     sum_a = summarize(pages_after)
 
-    # ── Query-level fetch: for movers tables (who gained/lost clicks) ──
+    # ── Query-level fetch: only for unique-query counts ──
     queries_before = clean_and_tag(fetch_gsc_queries(service, before_start, before_end))
     queries_after = clean_and_tag(fetch_gsc_queries(service, after_start, after_end))
 
@@ -328,9 +257,6 @@ def compute_comparison(before_start, before_end, after_start, after_end):
             "pos_change": round(a["avg_position"] - b["avg_position"], 2),
             "ctr_change_pp": round((a["ctr"] - b["ctr"]) * 100, 2),
         }
-
-    cat_gainers, cat_losers, cat_pos_drops, cat_emerging = page_movers(queries_before, queries_after, "category")
-    prod_gainers, prod_losers, prod_pos_drops, prod_emerging = page_movers(queries_before, queries_after, "product")
 
     # Build daily series BEFORE freeing page data
     daily = {
@@ -371,19 +297,13 @@ def compute_comparison(before_start, before_end, after_start, after_end):
         },
         "comparison": comparison,
         "daily": daily,
-        "movers": {
-            "category": {"gainers": cat_gainers, "losers": cat_losers,
-                         "pos_drops": cat_pos_drops, "emerging": cat_emerging},
-            "product": {"gainers": prod_gainers, "losers": prod_losers,
-                        "pos_drops": prod_pos_drops, "emerging": prod_emerging},
-        },
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
     }
 
 
 def default_periods():
     today = datetime.date.today()
-    lag = 4
+    lag = 7  # GSC finalization safety: ensures the after-window is fully aggregated
     after_end = today - datetime.timedelta(days=lag)
     after_start = today - datetime.timedelta(days=lag + 6)
     before_end = today - datetime.timedelta(days=lag + 28)
