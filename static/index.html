@@ -86,11 +86,6 @@
   .legend .dot { width: 10px; height: 10px; }
   .section-title { font-size: 14px; font-weight: 500; margin: 4px 0 10px; }
   .section-note { font-size: 12px; color: var(--text-2); margin: -6px 0 10px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px; }
-  th { text-align: right; font-size: 12px; color: var(--text-2); font-weight: 400; padding: 8px 6px; border-bottom: 0.5px solid var(--border); }
-  th:first-child { text-align: left; }
-  td { padding: 8px 6px; border-bottom: 0.5px solid var(--border); text-align: right; }
-  td:first-child { text-align: left; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .loading { text-align: center; padding: 60px; color: var(--text-2); }
   .filter-note {
     background: var(--secondary); border-radius: 10px; padding: 10px 14px;
@@ -103,8 +98,6 @@
   }
   .row-counts span { display: flex; align-items: center; gap: 4px; }
   .row-counts .count { color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
-  .pos-worse { color: var(--red); }
-  .pos-better { color: var(--green); }
   .error { background: var(--red-bg); color: var(--red); padding: 16px; border-radius: 10px; }
   @media (max-width: 720px) {
     .kpi-row { grid-template-columns: 1fr 1fr; }
@@ -162,11 +155,11 @@ function pctClass(v, invert=false) {
 }
 function sign(v, suffix="%") { return (v > 0 ? "+" : "") + v + suffix; }
 
-// FIX: Match backend's 4-day lag instead of 3
+// Match backend's 7-day finalization lag
 function presetParams(weeksAgo) {
   const iso = d => d.toISOString().slice(0, 10);
   const today = new Date();
-  const lag = 4; // GSC needs ~4 days to finalize
+  const lag = 7; // GSC finalization safety: after-window fully aggregated
   const afterEnd = new Date(today); afterEnd.setDate(today.getDate() - lag);
   const afterStart = new Date(today); afterStart.setDate(today.getDate() - lag - 6);
   const beforeEnd = new Date(today); beforeEnd.setDate(today.getDate() - lag - weeksAgo * 7);
@@ -264,23 +257,7 @@ function render(d) {
     <div class="chart-wrap"><canvas id="clicksChart"></canvas></div>
     <div class="chart-wrap"><canvas id="ctrChart"></canvas></div>`;
 
-  const tables = `
-    <div class="section-title">Top category gainers (by clicks)</div>
-    ${moverTable(d.movers.category.gainers)}
-    <div class="section-title">Top product gainers (by clicks)</div>
-    ${moverTable(d.movers.product.gainers)}
-    <div class="section-title">New emerging category pages</div>
-    <p class="section-note">Getting clicks now but had zero in the before period — brand-new winners.</p>
-    ${emergingTable(d.movers.category.emerging)}
-    <div class="section-title">New emerging product pages</div>
-    <p class="section-note">Getting clicks now but had zero in the before period — brand-new winners.</p>
-    ${emergingTable(d.movers.product.emerging)}
-    <div class="section-title">Category pages losing position</div>
-    ${posTable(d.movers.category.pos_drops)}
-    <div class="section-title">Product pages losing position</div>
-    ${posTable(d.movers.product.pos_drops)}`;
-
-  document.getElementById("content").innerHTML = kpis + rowCountsHtml + cards + charts + tables;
+  document.getElementById("content").innerHTML = kpis + rowCountsHtml + cards + charts;
   drawClicks(d.daily);
   drawCtr(d.daily);
 }
@@ -312,50 +289,6 @@ function segmentCard(title, color, seg, highlight) {
           <div class="sub ${pctClass(seg.ctr_change_pp)}">${sign(seg.ctr_change_pp, "pp")}</div></div>
       </div>
     </div>`;
-}
-
-function moverTable(rows) {
-  if (!rows || !rows.length) return '<p class="subtitle">No data</p>';
-  const body = rows.map(r => `
-    <tr>
-      <td title="${r.page}">${r.page}</td>
-      <td>${r.clicks_before}</td>
-      <td>${r.clicks_after}</td>
-      <td class="${r.click_change >= 0 ? "up" : "down"}">${sign(r.click_change, "")}</td>
-      <td>${r.pos_before} → ${r.pos_after}</td>
-    </tr>`).join("");
-  return `<table>
-    <thead><tr><th>Page</th><th>Clicks before</th><th>Clicks after</th><th>Change</th><th>Position</th></tr></thead>
-    <tbody>${body}</tbody></table>`;
-}
-
-function emergingTable(rows) {
-  if (!rows || !rows.length) return '<p class="subtitle">No new emerging pages this period.</p>';
-  const body = rows.map(r => `
-    <tr>
-      <td title="${r.page}">${r.page}</td>
-      <td class="up">${r.clicks_after}</td>
-      <td>${fmt(r.impressions_after)}</td>
-      <td>${r.pos_after}</td>
-    </tr>`).join("");
-  return `<table>
-    <thead><tr><th>Page</th><th>Clicks now</th><th>Impressions now</th><th>Position now</th></tr></thead>
-    <tbody>${body}</tbody></table>`;
-}
-
-function posTable(rows) {
-  if (!rows || !rows.length) return '<p class="subtitle">No pages lost position (good news).</p>';
-  const body = rows.map(r => `
-    <tr>
-      <td title="${r.page}">${r.page}</td>
-      <td>${r.pos_before}</td>
-      <td>${r.pos_after}</td>
-      <td class="pos-worse">+${r.pos_change}</td>
-      <td>${r.clicks_before} → ${r.clicks_after}</td>
-    </tr>`).join("");
-  return `<table>
-    <thead><tr><th>Page</th><th>Pos before</th><th>Pos after</th><th>Drop</th><th>Clicks</th></tr></thead>
-    <tbody>${body}</tbody></table>`;
 }
 
 let clicksChart, ctrChart;
